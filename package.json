@@ -12,10 +12,13 @@
     "lint": "echo 'lint do live-service será configurado na etapa de qualidade'"
   },
   "dependencies": {
+    "amqplib": "^2.4.0",
     "dotenv": "16.4.7",
-    "fastify": "5.2.1"
+    "fastify": "5.2.1",
+    "ioredis": "^6.0.0"
   },
   "devDependencies": {
+    "@types/amqplib": "^0.10.8",
     "@types/node": "22.10.2",
     "tsx": "4.19.2",
     "typescript": "5.7.2"
