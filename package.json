@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test",
+    "test": "tsx --test tests/unit/*.test.ts",
     "lint": "echo 'lint do live-service será configurado na etapa de qualidade'"
   },
   "dependencies": {
