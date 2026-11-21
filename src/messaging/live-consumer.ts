@@ -5,6 +5,10 @@ import amqp, {
 } from 'amqplib';
 import type Redis from 'ioredis';
 import { LiveStateStore } from '../live/live-state-store.js';
+import {
+  LiveConnectionRegistry,
+  type LiveWebSocketMessage,
+} from '../websocket/live-connection-registry.js';
 
 type IncomingEvent = {
   eventId: string;
@@ -45,6 +49,7 @@ export class LiveConsumer {
   public constructor(
     private readonly rabbitUrl: string,
     private readonly store: LiveStateStore,
+    private readonly registry: LiveConnectionRegistry,
     private readonly exchange = 'powergrid.events',
     private readonly queue = 'live.events',
   ) {}
@@ -83,6 +88,11 @@ export class LiveConsumer {
     try {
       const event = parseEvent(message);
 
+      const payload =
+        event.payload !== undefined && typeof event.payload === 'object'
+          ? event.payload
+          : event;
+
       const applied = await this.store.apply({
         eventId: event.eventId,
         eventType: event.eventType,
@@ -94,11 +104,27 @@ export class LiveConsumer {
           typeof event.correlationId === 'string'
             ? event.correlationId
             : null,
-        payload:
-          event.payload !== undefined && typeof event.payload === 'object'
-            ? event.payload
-            : event,
+        payload,
       });
+
+      if (applied) {
+        const websocketMessage: LiveWebSocketMessage = {
+          type: 'order.updated',
+          eventId: event.eventId,
+          eventType: event.eventType,
+          aggregateId: event.aggregateId,
+          aggregateVersion: event.aggregateVersion,
+          occurredAt:
+            typeof event.occurredAt === 'string' ? event.occurredAt : null,
+          correlationId:
+            typeof event.correlationId === 'string'
+              ? event.correlationId
+              : null,
+          payload,
+        };
+
+        this.registry.broadcast(websocketMessage);
+      }
 
       console.log(
         JSON.stringify({
@@ -106,6 +132,7 @@ export class LiveConsumer {
           eventType: event.eventType,
           aggregateId: event.aggregateId,
           applied,
+          websocketClients: this.registry.size(),
         }),
       );
 

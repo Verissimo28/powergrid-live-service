@@ -1,8 +1,11 @@
 import 'dotenv/config';
 import Fastify from 'fastify';
+import websocket from '@fastify/websocket';
 import { Redis } from 'ioredis';
+import type { WebSocket } from 'ws';
 import { LiveStateStore } from './live/live-state-store.js';
 import { LiveConsumer } from './messaging/live-consumer.js';
+import { LiveConnectionRegistry } from './websocket/live-connection-registry.js';
 
 const port = Number(process.env.LIVE_HTTP_PORT ?? 3002);
 const redisUrl = process.env.LIVE_REDIS_URL;
@@ -20,11 +23,16 @@ const app = Fastify({
   logger: true,
 });
 
+await app.register(websocket);
+
 const redis = new Redis(redisUrl);
 const store = new LiveStateStore(redis);
+const registry = new LiveConnectionRegistry();
+
 const consumer = new LiveConsumer(
   rabbitUrl,
   store,
+  registry,
   process.env.RABBITMQ_EXCHANGE ?? 'powergrid.events',
 );
 
@@ -47,6 +55,32 @@ app.get<{ Params: { orderId: string } }>(
     }
 
     return state;
+  },
+);
+
+app.get(
+  '/ws',
+  { websocket: true },
+  (socket: WebSocket): void => {
+    registry.add(socket);
+
+    app.log.info(
+      { websocketClients: registry.size() },
+      'cliente WebSocket conectado',
+    );
+
+    socket.on('close', () => {
+      registry.remove(socket);
+
+      app.log.info(
+        { websocketClients: registry.size() },
+        'cliente WebSocket desconectado',
+      );
+    });
+
+    socket.on('error', () => {
+      registry.remove(socket);
+    });
   },
 );
 
