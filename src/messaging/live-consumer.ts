@@ -21,6 +21,8 @@ type IncomingEvent = {
   [key: string]: unknown;
 };
 
+const MAX_RETRIES = 3;
+
 function parseEvent(message: ConsumeMessage): IncomingEvent {
   const parsed: unknown = JSON.parse(message.content.toString('utf8'));
 
@@ -40,6 +42,12 @@ function parseEvent(message: ConsumeMessage): IncomingEvent {
   }
 
   return event as IncomingEvent;
+}
+
+function retryCount(message: ConsumeMessage): number {
+  const value = message.properties.headers?.['x-retry-count'];
+
+  return typeof value === 'number' ? value : 0;
 }
 
 export class LiveConsumer {
@@ -62,6 +70,14 @@ export class LiveConsumer {
       durable: true,
     });
 
+    await this.channel.assertExchange('powergrid.retry', 'topic', {
+      durable: true,
+    });
+
+    await this.channel.assertExchange('powergrid.dlx', 'topic', {
+      durable: true,
+    });
+
     await this.channel.assertQueue(this.queue, {
       durable: true,
     });
@@ -75,6 +91,53 @@ export class LiveConsumer {
       }
 
       void this.handle(message);
+    });
+  }
+
+  private async publishRetry(
+    message: ConsumeMessage,
+    count: number,
+  ): Promise<void> {
+    const channel = this.channel;
+
+    if (channel === undefined) {
+      throw new Error('Canal RabbitMQ indisponível.');
+    }
+
+    const routingKey = message.fields.routingKey || 'order.unknown';
+
+    channel.publish('powergrid.retry', routingKey, message.content, {
+      persistent: true,
+      contentType: message.properties.contentType ?? 'application/json',
+      headers: {
+        ...message.properties.headers,
+        'x-retry-count': count,
+      },
+    });
+  }
+
+  private async publishDeadLetter(
+    message: ConsumeMessage,
+    error: unknown,
+  ): Promise<void> {
+    const channel = this.channel;
+
+    if (channel === undefined) {
+      throw new Error('Canal RabbitMQ indisponível.');
+    }
+
+    const routingKey = message.fields.routingKey || 'order.unknown';
+    const errorMessage =
+      error instanceof Error ? error.message : 'Erro desconhecido';
+
+    channel.publish('powergrid.dlx', routingKey, message.content, {
+      persistent: true,
+      contentType: message.properties.contentType ?? 'application/json',
+      headers: {
+        ...message.properties.headers,
+        'x-dead-letter-reason': errorMessage,
+        'x-live-retry-count': retryCount(message),
+      },
     });
   }
 
@@ -138,8 +201,36 @@ export class LiveConsumer {
 
       channel.ack(message);
     } catch (error) {
-      console.error('Falha ao processar evento do Live Service', error);
-      channel.nack(message, false, true);
+      const count = retryCount(message);
+
+      try {
+        if (count < MAX_RETRIES) {
+          await this.publishRetry(message, count + 1);
+
+          console.error(
+            JSON.stringify({
+              action: 'retry',
+              retryCount: count + 1,
+              error: error instanceof Error ? error.message : error,
+            }),
+          );
+        } else {
+          await this.publishDeadLetter(message, error);
+
+          console.error(
+            JSON.stringify({
+              action: 'dead-letter',
+              retryCount: count,
+              error: error instanceof Error ? error.message : error,
+            }),
+          );
+        }
+
+        channel.ack(message);
+      } catch (publishError) {
+        console.error('Falha ao encaminhar mensagem para retry/DLQ', publishError);
+        channel.nack(message, false, false);
+      }
     }
   }
 
