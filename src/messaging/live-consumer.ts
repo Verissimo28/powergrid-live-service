@@ -53,6 +53,8 @@ function retryCount(message: ConsumeMessage): number {
 export class LiveConsumer {
   private connection: ChannelModel | undefined;
   private channel: Channel | undefined;
+  private stopping = false;
+  private reconnecting = false;
 
   public constructor(
     private readonly rabbitUrl: string,
@@ -63,35 +65,104 @@ export class LiveConsumer {
   ) {}
 
   public async start(): Promise<void> {
-    this.connection = await amqp.connect(this.rabbitUrl);
-    this.channel = await this.connection.createChannel();
+    this.stopping = false;
+    await this.connect();
 
-    await this.channel.assertExchange(this.exchange, 'topic', {
+    console.log(
+      JSON.stringify({
+        service: 'live-service',
+        action: 'rabbit-connected',
+      }),
+    );
+  }
+
+  private async connect(): Promise<void> {
+    const connection = await amqp.connect(this.rabbitUrl);
+    const channel = await connection.createChannel();
+
+    this.connection = connection;
+    this.channel = channel;
+
+    connection.on('close', () => {
+      if (!this.stopping) {
+        this.scheduleReconnect();
+      }
+    });
+
+    connection.on('error', (error) => {
+      if (!this.stopping) {
+        console.error('Conexão RabbitMQ do Live apresentou erro', error);
+      }
+    });
+
+    await channel.assertExchange(this.exchange, 'topic', {
       durable: true,
     });
 
-    await this.channel.assertExchange('powergrid.retry', 'topic', {
+    await channel.assertExchange('powergrid.retry', 'topic', {
       durable: true,
     });
 
-    await this.channel.assertExchange('powergrid.dlx', 'topic', {
+    await channel.assertExchange('powergrid.dlx', 'topic', {
       durable: true,
     });
 
-    await this.channel.assertQueue(this.queue, {
+    await channel.assertQueue(this.queue, {
       durable: true,
     });
 
-    await this.channel.bindQueue(this.queue, this.exchange, 'order.#');
-    await this.channel.prefetch(10);
+    await channel.bindQueue(this.queue, this.exchange, 'order.#');
+    await channel.prefetch(10);
 
-    await this.channel.consume(this.queue, (message) => {
+    await channel.consume(this.queue, (message) => {
       if (message === null) {
         return;
       }
 
       void this.handle(message);
     });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnecting || this.stopping) {
+      return;
+    }
+
+    this.reconnecting = true;
+
+    void (async () => {
+      let delay = 1000;
+
+      while (!this.stopping) {
+        try {
+          await this.connect();
+
+          console.log(
+            JSON.stringify({
+              service: 'live-service',
+              action: 'rabbit-reconnected',
+            }),
+          );
+
+          this.reconnecting = false;
+          return;
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              service: 'live-service',
+              action: 'rabbit-reconnect-failed',
+              error: error instanceof Error ? error.message : error,
+              retryInMs: delay,
+            }),
+          );
+
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay = Math.min(delay * 2, 30000);
+        }
+      }
+
+      this.reconnecting = false;
+    })();
   }
 
   private async publishRetry(
@@ -235,8 +306,11 @@ export class LiveConsumer {
   }
 
   public async close(): Promise<void> {
-    await this.channel?.close();
-    await this.connection?.close();
+    this.stopping = true;
+    this.reconnecting = false;
+
+    await this.channel?.close().catch(() => undefined);
+    await this.connection?.close().catch(() => undefined);
 
     this.channel = undefined;
     this.connection = undefined;
