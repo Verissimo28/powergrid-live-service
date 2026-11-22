@@ -23,6 +23,8 @@ type IncomingEvent = {
 
 const MAX_RETRIES = 3;
 
+type RabbitConnector = (url: string) => Promise<ChannelModel>;
+
 function parseEvent(message: ConsumeMessage): IncomingEvent {
   const parsed: unknown = JSON.parse(message.content.toString('utf8'));
 
@@ -62,6 +64,7 @@ export class LiveConsumer {
     private readonly registry: LiveConnectionRegistry,
     private readonly exchange = 'powergrid.events',
     private readonly queue = 'live.events',
+    private readonly connectRabbit: RabbitConnector = (url) => amqp.connect(url),
   ) {}
 
   public async start(): Promise<void> {
@@ -77,7 +80,7 @@ export class LiveConsumer {
   }
 
   private async connect(): Promise<void> {
-    const connection = await amqp.connect(this.rabbitUrl);
+    const connection = await this.connectRabbit(this.rabbitUrl);
     const channel = await connection.createChannel();
 
     this.connection = connection;
